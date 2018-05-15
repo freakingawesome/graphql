@@ -264,7 +264,7 @@ func executeFieldsSerially(p executeFieldsParams) *Result {
 		p.Fields = map[string][]*ast.Field{}
 	}
 
-	finalResults := map[string]interface{}{}
+	finalResults := make(map[string]interface{}, len(p.Fields))
 	for responseName, fieldASTs := range p.Fields {
 		resolved, state := resolveField(p.ExecutionContext, p.ParentType, p.Source, fieldASTs)
 		if state.hasNoFieldDefs {
@@ -292,7 +292,7 @@ func executeFields(p executeFieldsParams) *Result {
 	recoverChan := make(chan interface{}, len(p.Fields))
 
 	var resultsMutex sync.Mutex
-	finalResults := map[string]interface{}{}
+	finalResults := make(map[string]interface{}, len(p.Fields))
 	for responseName, fieldASTs := range p.Fields {
 		resolved, state := resolveField(p.ExecutionContext, p.ParentType, p.Source, fieldASTs)
 		if state.hasNoFieldDefs {
@@ -313,9 +313,9 @@ func executeFields(p executeFieldsParams) *Result {
 			}(responseName)
 		} else {
 			resultsMutex.Lock()
-			finalResults[responseName] = resolved
+		finalResults[responseName] = resolved
 			resultsMutex.Unlock()
-		}
+	}
 	}
 
 	for i := 0; i < numberOfDeferredFunctions; i++ {
@@ -551,20 +551,20 @@ func resolveField(eCtx *executionContext, parentType *Object, source interface{}
 	// catch panic from resolveFn
 	var returnType Output
 	handleRecover := func(r interface{}) {
-		var err error
-		if r, ok := r.(string); ok {
-			err = NewLocatedError(
-				fmt.Sprintf("%v", r),
-				FieldASTsToNodeASTs(fieldASTs),
-			)
-		}
-		if r, ok := r.(error); ok {
-			err = gqlerrors.FormatError(r)
-		}
-		// send panic upstream
-		if _, ok := returnType.(*NonNull); ok {
-			panic(gqlerrors.FormatError(err))
-		}
+			var err error
+			if r, ok := r.(string); ok {
+				err = NewLocatedError(
+					fmt.Sprintf("%v", r),
+					FieldASTsToNodeASTs(fieldASTs),
+				)
+			}
+			if r, ok := r.(error); ok {
+				err = gqlerrors.FormatError(r)
+			}
+			// send panic upstream
+			if _, ok := returnType.(*NonNull); ok {
+				panic(gqlerrors.FormatError(err))
+			}
 		eCtx.addError(gqlerrors.FormatError(err))
 	}
 
@@ -852,7 +852,7 @@ func completeListValue(eCtx *executionContext, returnType *List, fieldASTs []*as
 	}
 
 	itemType := returnType.OfType
-	completedResults := []interface{}{}
+	completedResults := make([]interface{}, 0, resultVal.Len())
 	for i := 0; i < resultVal.Len(); i++ {
 		val := resultVal.Index(i).Interface()
 		completedItem := completeValueCatchingError(eCtx, itemType, fieldASTs, info, val)
@@ -893,8 +893,13 @@ type FieldResolver interface {
 // and returns it as the result, or if it's a function, returns the result
 // of calling that function.
 func DefaultResolveFn(p ResolveParams) (interface{}, error) {
-	// try to resolve p.Source as a struct first
 	sourceVal := reflect.ValueOf(p.Source)
+	// Check if value implements 'Resolver' interface
+	if resolver, ok := sourceVal.Interface().(FieldResolver); ok {
+		return resolver.Resolve(p)
+	}
+
+	// try to resolve p.Source as a struct
 	if sourceVal.IsValid() && sourceVal.Type().Kind() == reflect.Ptr {
 		sourceVal = sourceVal.Elem()
 	}
@@ -902,17 +907,12 @@ func DefaultResolveFn(p ResolveParams) (interface{}, error) {
 		return nil, nil
 	}
 
-	// Check if value implements 'Resolver' interface
-	if resolver, ok := sourceVal.Interface().(FieldResolver); ok {
-		return resolver.Resolve(p)
-	}
-
 	if sourceVal.Type().Kind() == reflect.Struct {
 		for i := 0; i < sourceVal.NumField(); i++ {
 			valueField := sourceVal.Field(i)
 			typeField := sourceVal.Type().Field(i)
 			// try matching the field name first
-			if typeField.Name == p.Info.FieldName {
+			if strings.EqualFold(typeField.Name, p.Info.FieldName) {
 				return valueField.Interface(), nil
 			}
 			tag := typeField.Tag
